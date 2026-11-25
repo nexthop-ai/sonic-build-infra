@@ -1,0 +1,5 @@
+control-consumer (1.0) unstable; urgency=medium
+
+  * Exercise the independent control archive consumer.
+
+ -- Consumer <consumer@example.invalid>  Thu, 01 Jan 2026 00:00:00 +0000

@@ -1,0 +1,37 @@
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@tar.bzl//tar:tar.bzl", "tar")
+
+package(default_testonly = True)
+
+tar(
+    name = "archive",
+    srcs = ["payload.txt"],
+    args = ["--format=ustar"],
+    mtree = [
+        ". type=dir uid=0 gid=0 mode=0755 time=0",
+        "./etc type=dir uid=0 gid=0 mode=0755 time=0",
+        "./etc/path\\040with\\040spaces type=file uid=123 gid=456 mode=0640 time=0 content=$(location payload.txt)",
+        "./etc/\\346\\270\\251\\345\\272\\246.txt type=file uid=0 gid=0 mode=0751 time=0 content=$(location payload.txt)",
+        "./etc/link type=link uid=0 gid=0 mode=0777 time=0 link=path\\040with\\040spaces",
+    ],
+)
+
+py_test(
+    name = "bsdtar_test",
+    srcs = ["bsdtar_test.py"],
+    args = [
+        "--tool=$(location //tools/build_tools:bsdtar_executable_file)",
+        "--runtime=$(location //tools/build_tools:bsdtar_runtime_files)",
+        "--lock=$(location //apt:apt.lock.json)",
+        "--archive=$(location :archive)",
+        "--payload=$(location payload.txt)",
+    ],
+    data = [
+        ":archive",
+        "payload.txt",
+        "//apt:apt.lock.json",
+        "//tools/build_tools:bsdtar",
+        "//tools/build_tools:bsdtar_executable_file",
+        "//tools/build_tools:bsdtar_runtime_files",
+    ],
+)

@@ -1,0 +1,72 @@
+load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//deb:changelogs.bzl", "debian_changelogs")
+
+ARCH = select({
+    "@platforms//cpu:x86_64": "amd64",
+    "@platforms//cpu:aarch64": "arm64",
+})
+
+debian_changelogs(
+    name = "non_native",
+    outs = [
+        "non-native/NEWS.Debian",
+        "non-native/changelog",
+        "non-native/changelog.Debian",
+    ],
+    architecture = ARCH,
+    changelog = "fixtures/changelog",
+    control = "fixtures/control",
+    debian_files = {"fixtures/NEWS": "NEWS"},
+    package = "changelog-fixture",
+    upstream = "fixtures/CHANGES",
+)
+
+expand_template(
+    name = "native_source",
+    out = "native-source/changelog",
+    substitutions = {"1.8-1": "1.8"},
+    template = "fixtures/changelog",
+)
+
+debian_changelogs(
+    name = "native",
+    outs = ["native/changelog"],
+    architecture = ARCH,
+    changelog = ":native_source",
+    control = "fixtures/control",
+    package = "changelog-fixture",
+)
+
+debian_changelogs(
+    name = "untrimmed",
+    outs = ["untrimmed/changelog.Debian"],
+    architecture = ARCH,
+    changelog = "fixtures/changelog",
+    control = "fixtures/control",
+    helper_args = ["--no-trim"],
+    package = "changelog-fixture",
+)
+
+py_test(
+    name = "changelogs_test",
+    srcs = ["changelogs_test.py"],
+    args = [
+        "$(rootpath non-native/changelog.Debian)",
+        "$(rootpath non-native/changelog)",
+        "$(rootpath non-native/NEWS.Debian)",
+        "$(rootpath native/changelog)",
+        "$(rootpath untrimmed/changelog.Debian)",
+        "$(rootpath fixtures/changelog)",
+        "$(rootpath fixtures/CHANGES)",
+    ],
+    data = [
+        "fixtures/CHANGES",
+        "fixtures/changelog",
+        "native/changelog",
+        "non-native/NEWS.Debian",
+        "non-native/changelog",
+        "non-native/changelog.Debian",
+        "untrimmed/changelog.Debian",
+    ],
+)

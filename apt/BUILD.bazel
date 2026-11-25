@@ -1,0 +1,65 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
+load("@sonic_apt_pip//:requirements.bzl", "requirement")
+
+package(default_visibility = ["//visibility:public"])
+
+py_library(
+    name = "lib",
+    srcs = glob(["sonic_apt/*.py"]),
+    imports = ["."],
+    deps = [requirement("python-debian")],
+)
+
+py_test(
+    name = "selection_test",
+    srcs = ["tests/selection_test.py"],
+    deps = [":lib"],
+)
+
+py_test(
+    name = "inputs_test",
+    srcs = ["tests/inputs_test.py"],
+    deps = [":lib"],
+)
+
+py_test(
+    name = "dependencies_test",
+    srcs = ["tests/dependencies_test.py"],
+    deps = [":lib"],
+)
+
+exports_files([
+    "apt.lock.json",
+    "requests.json",
+    "sources.json",
+    "export_inputs.py",
+    "requirements_lock.txt",
+])
+
+# Check the reviewed lock with the registered interpreter. Regenerating a stale
+# lock requires the bootstrap command documented in README.md.
+py_binary(
+    name = "lock",
+    srcs = ["lock.py"],
+    imports = ["."],
+)
+
+py_test(
+    name = "lock_test",
+    srcs = [
+        "lock.py",
+        "tests/lock_test.py",
+    ],
+    imports = ["."],
+    main = "tests/lock_test.py",
+    data = ["tests/testdata/new-provider-alias-export.json"],
+)
+
+py_test(
+    name = "bookworm_lock_test",
+    srcs = ["lock.py", "tests/bookworm_lock_test.py"],
+    main = "tests/bookworm_lock_test.py",
+    imports = ["."],
+    args = ["$(rootpath " + name + ")" for name in ["apt.lock.json", "sources.json", "requests.json"]],
+    data = ["apt.lock.json", "sources.json", "requests.json"],
+)

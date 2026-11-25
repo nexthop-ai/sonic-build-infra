@@ -1,0 +1,11 @@
+Source: changelog-fixture
+Section: misc
+Priority: optional
+Maintainer: Fixture Maintainer <fixture@example.invalid>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+
+Package: changelog-fixture
+Architecture: all
+Description: Fixture for original changelog installation behavior
+ No service or system configuration is installed.

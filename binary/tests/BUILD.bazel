@@ -1,0 +1,108 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_static_library.bzl", "cc_static_library")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("//binary:strip_static_archive.bzl", "strip_static_archive")
+load("//cc:runtime_test.bzl", "native_runtime_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "archive_fixture",
+    testonly = True,
+    srcs = ["archive_sum.c", "archive_product.c"],
+    copts = ["-g", "-O0"],
+    linkstatic = True,
+)
+
+cc_static_library(
+    name = "debug_archive",
+    testonly = True,
+    deps = [":archive_fixture"],
+)
+
+strip_static_archive(
+    name = "stripped_archive",
+    testonly = True,
+    src = ":debug_archive",
+    out = "stripped.a",
+)
+
+cc_import(
+    name = "installed_archive",
+    testonly = True,
+    static_library = ":stripped_archive",
+)
+
+cc_binary(
+    name = "archive_consumer",
+    testonly = True,
+    srcs = ["archive_consumer.c"],
+    deps = [":installed_archive"],
+    features = ["-strip_debug_symbols"],
+)
+
+py_binary(
+    name = "archive_check_tool",
+    testonly = True,
+    srcs = ["strip_static_archive_test.py"],
+    main = "strip_static_archive_test.py",
+    deps = ["//deb:elf_metadata"],
+)
+
+# This action runs a native checker even when its archive/consumer target ARM.
+genrule(
+    name = "strip_static_archive_check",
+    testonly = True,
+    srcs = [":debug_archive", ":stripped_archive", ":archive_consumer"],
+    tools = [":archive_check_tool"],
+    outs = ["strip_static_archive_check.json"],
+    cmd = "$(location :archive_check_tool) --input $(location :debug_archive) --stripped $(location :stripped_archive) --consumer $(location :archive_consumer) --report $@ --machine " + select({
+        "@platforms//cpu:x86_64": "62",
+        "@platforms//cpu:aarch64": "183",
+    }),
+)
+
+py_test(
+    name = "strip_static_archive_test",
+    srcs = ["strip_static_archive_test.py"],
+    args = [
+        "--input", "$(rootpath :debug_archive)",
+        "--stripped", "$(rootpath :stripped_archive)",
+        "--consumer", "$(rootpath :archive_consumer)",
+        "--machine",
+    ] + select({
+        "@platforms//cpu:x86_64": ["62"],
+        "@platforms//cpu:aarch64": ["183"],
+    }),
+    data = [":debug_archive", ":stripped_archive", ":archive_consumer"],
+    deps = ["//deb:elf_metadata"],
+)
+
+native_runtime_test(
+    name = "stripped_archive_consumer_test",
+    binary = ":archive_consumer",
+    runtime_payloads = ["@build_tools//libc6:data"],
+)
+
+test_suite(
+    name = "strip_static_archive_tests",
+    tests = [":strip_static_archive_test", ":stripped_archive_consumer_test"],
+)
+
+# Explicit expected-failure probe, excluded from wildcard regression selection.
+write_file(
+    name = "invalid_archive_input",
+    out = "not_archive.a",
+    content = ["This file is not an ar archive."],
+)
+
+strip_static_archive(
+    name = "invalid_archive",
+    testonly = True,
+    tags = ["manual"],
+    src = ":invalid_archive_input",
+    out = "invalid_stripped.a",
+)

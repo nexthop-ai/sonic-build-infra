@@ -1,0 +1,20 @@
+Source: control-files-fixture
+Maintainer: Fixture Owner <fixture@example.invalid>
+Section: admin
+Priority: optional
+Build-Depends: debhelper-compat (= 13)
+
+Package: fancontrol
+Architecture: all
+Depends: ${misc:Depends}
+Description: First-install and restart-after-upgrade policy fixture
+
+Package: lm-sensors
+Architecture: all
+Depends: ${misc:Depends}
+Description: No-start policy fixture
+
+Package: metadata-library
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Shared-library trigger policy fixture

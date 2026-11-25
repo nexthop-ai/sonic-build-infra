@@ -1,0 +1,242 @@
+name: Bazel
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Validation scope; deb-fixtures explicitly generates sample DEBs'
+        type: choice
+        options: [tar-runtime, deb-fixtures]
+        default: tar-runtime
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Only automatic runs for the same pull request supersede each other.
+  group: bazel-${{ github.run_attempt == '1' && github.event.pull_request.number || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Bazel (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: AMD64
+            runner: ubuntu-24.04
+            machine: x86_64
+            debian_arch: amd64
+            bazel_arch: x86_64
+            bazel_sha: 61d89402f0368e64b6c827be5de79d8e65382e8124c3cbb97325611a1851392e
+          - arch: ARM64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+            debian_arch: arm64
+            bazel_arch: arm64
+            bazel_sha: b7f2a85595e8a87d54843bc656c1e379fd9b8c1b5f783dc41717c1d7eb7cc49f
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    container:
+      image: debian:trixie-20260918@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+    defaults:
+      run:
+        shell: bash
+    env:
+      SONIC_BAZEL_CI_SUITE: ${{ inputs.suite || 'tar-runtime' }}
+      DEBIAN_FRONTEND: noninteractive
+      EXPECTED_MACHINE: ${{ matrix.machine }}
+      EXPECTED_DEBIAN_ARCH: ${{ matrix.debian_arch }}
+      CI_IMAGE: debian:trixie-20260918@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+      SONIC_BAZEL_REGISTRY: https://raw.githubusercontent.com/securely1g/sonic-bazel-registry/main
+    steps:
+      - name: Install native build tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends binutils build-essential ca-certificates curl gdb git libxml2 python3 tar xz-utils
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check public evidence boundaries
+        run: python3 -B ci/tests/evidence_test.py
+      - name: Verify native execution and install Bazel 8.5.1
+        env:
+          BAZEL_ARCH: ${{ matrix.bazel_arch }}
+          BAZEL_SHA: ${{ matrix.bazel_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == "$EXPECTED_MACHINE" ]]
+          [[ "$(dpkg --print-architecture)" == "$EXPECTED_DEBIAN_ARCH" ]]
+          . /etc/os-release
+          [[ "$ID" == debian && "$VERSION_CODENAME" == trixie ]]
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          curl --fail --location --retry 3 --output /tmp/bazel "https://releases.bazel.build/8.5.1/release/bazel-8.5.1-linux-${BAZEL_ARCH}"
+          printf '%s  %s\n' "$BAZEL_SHA" /tmp/bazel | sha256sum --check --strict
+          install -m 0755 /tmp/bazel /usr/local/bin/bazel
+      - name: Check downloader configuration
+        run: python3 -B ci/tests/debian_transport_test.py
+      - name: Fetch the verified shared downloader configuration
+        env:
+          SOURCE_MIRRORS_URL: https://raw.githubusercontent.com/securely1g/sonic-bazel-registry/e7ee462aaa8fbd137ea2187f175506e308d81dcb/ci/source_mirrors.cfg
+          SOURCE_MIRRORS_SHA256: c28e6882aa9ebed84fd32586112e5fbfe9684af4e4aaa9942170919a3cbd308e
+        run: |
+          set -euo pipefail
+          config="$RUNNER_TEMP/declared-tools-downloads.cfg"
+          curl --fail --location --retry 3 --max-time 60 --output "$config.tmp" "$SOURCE_MIRRORS_URL"
+          printf '%s  %s\n' "$SOURCE_MIRRORS_SHA256" "$config.tmp" | sha256sum --check --strict
+          mv "$config.tmp" "$config"
+          mkdir -p ci-artifacts
+          cp "$config" ci-artifacts/source-mirrors.cfg
+          printf '%s\n' "$SOURCE_MIRRORS_URL" > ci-artifacts/source-mirrors-url.txt
+          sha256sum ci-artifacts/source-mirrors.cfg > ci-artifacts/source-mirrors.sha256
+      - name: Build and test source rules
+        run: SONIC_BAZEL_DOWNLOADER_CONFIG="$RUNNER_TEMP/declared-tools-downloads.cfg" bash ci/bazel-ci.sh
+      - name: Reject conflicting sysroot package files
+        run: >-
+          python3 toolchains/sysroot/tests/validate_collisions.py --artifacts ci-artifacts/sysroot-collisions
+          --startup-option=--ignore_all_rc_files
+          --bazel-option=--registry="$SONIC_BAZEL_REGISTRY"
+          --bazel-option=--registry=https://bcr.bazel.build/
+          --bazel-option=--downloader_config="$RUNNER_TEMP/declared-tools-downloads.cfg"
+      - name: Validate native Debian GCC, Clang and their shared sysroot
+        run: >-
+          python3 toolchains/sysroot/tests/validate.py --artifacts ci-artifacts/shared-sysroot
+          --startup-option=--ignore_all_rc_files
+          --bazel-option=--registry="$SONIC_BAZEL_REGISTRY"
+          --bazel-option=--registry=https://bcr.bazel.build/
+          --bazel-option=--downloader_config="$RUNNER_TEMP/declared-tools-downloads.cfg"
+      - name: Validate Debian cross GCC and Clang with an AMD64 source generator
+        if: matrix.arch == 'AMD64'
+        run: >-
+          python3 toolchains/sysroot/tests/validate_cross.py build --artifacts ci-artifacts/cross-arm64
+          --startup-option=--ignore_all_rc_files
+          --bazel-option=--registry="$SONIC_BAZEL_REGISTRY"
+          --bazel-option=--registry=https://bcr.bazel.build/
+          --bazel-option=--downloader_config="$RUNNER_TEMP/declared-tools-downloads.cfg"
+      - name: Send ARM64 programs and their declared runtime to the native runner
+        if: matrix.arch == 'AMD64'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonic-cross-arm64-${{ github.sha }}
+          path: ci-artifacts/cross-arm64/runtime-bundle.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain validation evidence and sample runtime/debug outputs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonic-build-infra-${{ matrix.arch }}-${{ github.sha }}
+          # Raw BEPs, action graphs and spawn logs are private job diagnostics.
+          path: |
+            ci-artifacts/suite.json
+            ci-artifacts/registry.txt
+            ci-artifacts/revisions.txt
+            ci-artifacts/uname.txt
+            ci-artifacts/os-release
+            ci-artifacts/apt-lock-check.log
+            ci-artifacts/apt/apt.lock.json
+            ci-artifacts/apt/sources.json
+            ci-artifacts/apt/requests.json
+            ci-artifacts/ci/source_mirrors.cfg
+            ci-artifacts/source-mirrors.cfg
+            ci-artifacts/source-mirrors-url.txt
+            ci-artifacts/source-mirrors.sha256
+            ci-artifacts/MODULE.bazel
+            ci-artifacts/MODULE.bazel.lock
+            ci-artifacts/validation.log
+            ci-artifacts/host-packages.txt
+            ci-artifacts/targets.txt
+            ci-artifacts/bookworm-targets.txt
+            ci-artifacts/action-audit.json
+            ci-artifacts/apt-python313-action-audit.json
+            ci-artifacts/bookworm-action-audit.json
+            ci-artifacts/deploy-archives.json
+            ci-artifacts/strip-static-archive-cross.json
+            ci-artifacts/module-graph.txt
+            ci-artifacts/wheel_requirements_lock.txt
+            ci-artifacts/shared-api.MODULE.bazel.lock
+            ci-artifacts/oci-controls-consumer.MODULE.bazel.lock
+            ci-artifacts/unsafe-sysroot.log
+            ci-artifacts/provenance.json
+            ci-artifacts/testlogs/**/test.xml
+            ci-artifacts/testlogs/**/test.log
+            ci-artifacts/apt-python313-testlogs/**/test.xml
+            ci-artifacts/apt-python313-testlogs/**/test.log
+            ci-artifacts/bookworm-testlogs/**/test.xml
+            ci-artifacts/bookworm-testlogs/**/test.log
+            ci-artifacts/tests/**/test.xml
+            ci-artifacts/tests/**/test.log
+            ci-artifacts/outputs/hello
+            ci-artifacts/outputs/hello_cpp
+            ci-artifacts/outputs/*.tar
+            ci-artifacts/shared-sysroot/validation.json
+            ci-artifacts/shared-sysroot/*/validation.json
+            ci-artifacts/shared-sysroot/*/debian-compiler-validation.json
+            ci-artifacts/shared-sysroot/*/MODULE.bazel.lock
+            ci-artifacts/shared-sysroot/*/launcher-test.log
+            ci-artifacts/shared-sysroot/*/*-runtime.txt
+            ci-artifacts/shared-sysroot/*/*-elf.txt
+            ci-artifacts/shared-sysroot/*/shared-library-dynamic.txt
+            ci-artifacts/shared-sysroot/*/binutils/readelf.txt
+            ci-artifacts/sysroot-collisions/validation.json
+            ci-artifacts/sysroot-collisions/MODULE.bazel.lock
+            ci-artifacts/sysroot-collisions/*.log
+            ci-artifacts/cross-arm64/build-validation.json
+            ci-artifacts/cross-arm64/*/MODULE.bazel.lock
+            ci-artifacts/cross-arm64/*/debian-compiler-validation.json
+            ci-artifacts/cross-arm64/*/*-runtime.txt
+            ci-artifacts/cross-arm64/*/*-elf.txt
+            ci-artifacts/cross-arm64/*/shared-library-dynamic.txt
+            ci-artifacts/cross-arm64/*/binutils/readelf.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  cross-runtime:
+    name: Execute AMD64 cross builds on native ARM64
+    needs: native
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    container:
+      image: debian:trixie-20260918@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+    steps:
+      - name: Install the test driver
+        run: apt-get update && apt-get install -y --no-install-recommends python3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sonic-cross-arm64-${{ github.sha }}
+          path: cross-artifacts
+      - name: Run C/C++ programs and swap GCC/Clang shared libraries
+        run: python3 toolchains/sysroot/tests/validate_cross.py run --bundle cross-artifacts/runtime-bundle.tar.gz --artifacts ci-artifacts/cross-runtime
+      - name: Retain native ARM64 execution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonic-cross-runtime-arm64-${{ github.sha }}
+          path: ci-artifacts/cross-runtime/validation.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  compare-sysroots:
+    name: Compare sysroot contents across native hosts
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: sonic-build-infra-*-${{ github.sha }}
+          path: native-evidence
+      - name: Require identical source archives and sysroot files
+        run: python3 toolchains/sysroot/tests/compare_receipts.py native-evidence/*/shared-sysroot/validation.json

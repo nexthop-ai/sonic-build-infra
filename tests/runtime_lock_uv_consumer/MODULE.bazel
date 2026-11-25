@@ -1,0 +1,22 @@
+module(name = "managed_uv_runtime_lock_tests")
+bazel_dep(name = "sonic-build-infra", version = "0.0.44-35726399908a3beb947174e9359f902077928289", repo_name = "sonic_build_infra", dev_dependency = True)
+bazel_dep(name = "rules_python", version = "1.9.0.sonic.2", dev_dependency = True)
+uv = use_extension("@rules_python//python/uv:uv.bzl", "uv", dev_dependency = True)
+uv.configure(
+    version = "0.12.18",
+    platform = "x86_64-unknown-linux-gnu",
+    urls = ["https://github.com/astral-sh/uv/releases/download/0.12.18/uv-x86_64-unknown-linux-gnu.tar.gz"],
+    sha256 = "89eadd7c76fc063887959510d5ba0ab1264dfd5f1143b925ddb73021a40acf16",
+)
+uv.configure(
+    version = "0.12.18",
+    platform = "aarch64-unknown-linux-gnu",
+    urls = ["https://github.com/astral-sh/uv/releases/download/0.12.18/uv-aarch64-unknown-linux-gnu.tar.gz"],
+    sha256 = "afb6291f3f0a6b4521fc67b947822506c41dde5b60d2189dd8f3695b2ac8c9e7",
+)
+use_repo(uv, "uv")
+register_toolchains("@uv//:all", dev_dependency = True)
+python = use_extension("@rules_python//python/extensions:python.bzl", "python", dev_dependency = True)
+python.toolchain(python_version = "3.11")
+use_repo(python, "python_3_11")
+register_toolchains("@python_3_11//:all", dev_dependency = True)

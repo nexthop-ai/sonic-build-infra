@@ -1,0 +1,3 @@
+#!/bin/sh
+# Consumer service; control generation must not start it.
+exit 0

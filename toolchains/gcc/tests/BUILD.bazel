@@ -1,0 +1,47 @@
+load(":prefix_map.bzl", "prefix_map_fixture")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_foreign_cc//foreign_cc:defs.bzl", "configure_make")
+load("@rules_python//python:defs.bzl", "py_test")
+
+filegroup(
+    name = "sources",
+    srcs = [
+        "project/configure",
+        "project/probe.c",
+    ],
+)
+
+# Exercise configure's compiler probe from a subdirectory, including
+# an explicit dynamic libgcc reference that ordinary C programs can omit.
+configure_make(
+    name = "foreign_probe",
+    configure_in_place = True,
+    features = ["-sanitize_pwd"],
+    lib_source = ":sources",
+    out_binaries = [
+        "probe",
+        "probe-static-math",
+        "probe-bfd",
+    ],
+    out_data_dirs = ["share"],
+    targets = [],
+)
+
+py_test(
+    name = "foreign_link_test",
+    srcs = ["foreign_link_test.py"],
+    args = ["$(locations :foreign_probe)"],
+    data = [":foreign_probe"],
+)
+
+prefix_map_fixture(name = "prefix_map_object", src = "prefix_map.c")
+py_test(name = "prefix_map_test", srcs = ["prefix_map_test.py"], args = ["$(locations :prefix_map_object)"], data = [":prefix_map_object"])
+
+# Preprocessed assembly resolves system headers from the shared sysroot.
+cc_test(
+    name = "assembly_include_test",
+    srcs = [
+        "assembly_include.S",
+        "assembly_include_test.c",
+    ],
+)

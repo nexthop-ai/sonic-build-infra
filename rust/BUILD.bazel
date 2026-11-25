@@ -1,0 +1,10 @@
+load(":cargo.bzl", "cargo_runner", "rust_sdk")
+
+rust_sdk(name = "sdk")
+
+cargo_runner(
+    name = "cargo",
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["release.bzl"], visibility = ["//visibility:public"])

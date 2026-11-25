@@ -8,8 +8,8 @@ The only struct we really need is `PLATFORM_DEPENDENT_ARGS`
 
 load("//toolchains/gcc:gcc.bzl", "GCC_METADATA")
 
-def resolve_args(cpu, version, gcc_major, args):
-    """Fills in the toolchain's names, leaving the `{package}`s for cc_args.
+def resolve_args(cpu, version, gcc_major, args, tool_prefix = None):
+    """Fills in the toolchain's names, leaving directory placeholders for cc_args.
 
     Args:
         cpu: the `@platforms//cpu` value, e.g. `x86_64`.
@@ -17,6 +17,7 @@ def resolve_args(cpu, version, gcc_major, args):
         gcc_major: the major version of the GCC that built the sysroot, e.g.
                    `14`. Debian's paths only carry the major.
         args: the arg templates, from PLATFORM_DEPENDENT_ARGS below.
+        tool_prefix: Compiler distribution target triple, independent of Debian paths.
 
     Returns:
         The args with every `{single}` placeholder filled in.
@@ -24,7 +25,7 @@ def resolve_args(cpu, version, gcc_major, args):
     arch = GCC_METADATA[cpu]
     return [
         arg.format(
-            gcc = arch.gcc,
+            gcc = tool_prefix or arch.gcc,
             gcc_major = gcc_major,
             gcc_version = version,
             multiarch = arch.multiarch,
@@ -33,165 +34,90 @@ def resolve_args(cpu, version, gcc_major, args):
         for arg in args
     ]
 
-def resolve_packages(sysroot, gcc_repo, args):
-    """The packages `args` references, keyed by the name they reference them by.
+def resolve_inputs(sysroot, gcc_repo, args):
+    """Select declared directories referenced by an action's arguments.
 
     Args:
-        sysroot: logical package name -> the label of the directory holding it,
-                 from the `gcc.debian_toolchain()` tag that declared this
-                 toolchain.
-        gcc_repo: the GCC distribution repo, for the one directory that does
-                  not come from apt.
-        args: the resolved args, which name the packages they need.
+        sysroot: Label of the shared repository sysroot directory.
+        gcc_repo: Repository containing this compiler's private files.
+        args: Argument templates after resolving architecture/version fields.
 
     Returns:
-        The subset of the packages `args` actually references.
+        The directory labels referenced by cc_args format placeholders.
     """
-
-    # Every package this toolchain could reach into.
-    available = dict(sysroot)
-
-    # The one directory that comes from the GCC distribution rather than from apt.
-    available["gcc-builtin"] = gcc_repo + "//:builtin_headers"
-
+    available = {
+        "sysroot": sysroot,
+        "gcc-programs": gcc_repo + "//:compiler_programs",
+    }
     return {
         key: label
         for key, label in available.items()
         if any([("{%s}" % key) in arg for arg in args])
     }
 
-# The args below carry two kinds of placeholder:
-#
-#   {single}     an architecture's name, filled in here by `resolve_args`.
-#   {{doubled}}  a package from PACKAGES. `.format` unescapes it to `{package}`,
-#                which cc_args later fills in with that package's directory.
-
-# C compilation includes - use -isystem for libc headers for CGO compatibility
+# {single} placeholders are architecture/version fields. {{doubled}} ones
+# become directory placeholders resolved by cc_args with declared inputs.
+# GCC builtin headers and system headers come from the shared Debian sysroot.
 _C_INCLUDES_ARGS = [
-    # GCC builtin headers (stddef.h, stdarg.h, etc.) - must come first
     "-isystem",
-    "{{gcc-builtin}}/lib/gcc/{gcc}/{gcc_version}/include",
-
-    # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=70129
-    # libgcc include path - contains additional GCC headers for #include_next
+    "{{sysroot}}/usr/lib/gcc/{multiarch}/{gcc_major}/include",
     "-isystem",
-    "{{libgcc-dev}}/usr/lib/gcc/{multiarch}/{gcc_major}/include",
-
-    # Use -isystem for libc headers so CGO can find them (stdlib.h, etc.)
-    # These come after GCC headers for proper #include_next resolution
+    "{{sysroot}}/usr/include",
     "-isystem",
-    "{{linux-libc-dev}}/usr/include",
-    "-isystem",
-    "{{linux-libc-dev}}/usr/include/{multiarch}",
-    "-isystem",
-    "{{libc6-dev}}/usr/include",
-    "-isystem",
-    "{{libc6-dev}}/usr/include/{multiarch}",
-
-    # Workaround for rules_rust cargo_build_script and rules_foreign_cc
-    "-idirafter",
-    "../../../../../../../{{libgcc-dev}}/usr/lib/gcc/{multiarch}/{gcc_major}/include",
-    "-idirafter",
-    "../../../../../../../{{linux-libc-dev}}/usr/include",
-    "-idirafter",
-    "../../../../../../../{{linux-libc-dev}}/usr/include/{multiarch}",
-    "-idirafter",
-    "../../../../../../../{{libc6-dev}}/usr/include",
-    "-idirafter",
-    "../../../../../../../{{libc6-dev}}/usr/include/{multiarch}",
+    "{{sysroot}}/usr/include/{multiarch}",
 ]
 
-# C++ compilation includes - use -idirafter for all headers to support #include_next
+# C++ headers precede C headers for #include_next. Both rules_foreign_cc and
+# cargo_build_script make -isystem paths absolute before changing directory;
+# no fixed-depth relative fallback or package-specific layout is needed.
 _CPP_INCLUDES_ARGS = [
-    # GCC builtin headers (stddef.h, stdarg.h, etc.) - must come first
     "-isystem",
-    "{{gcc-builtin}}/lib/gcc/{gcc}/{gcc_version}/include",
-
-    # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=70129
-    "-idirafter",
-    "{{libgcc-dev}}/usr/lib/gcc/{multiarch}/{gcc_major}/include",
-
-    # C++ headers must come before C headers for #include_next to work
-    "-idirafter",
-    "{{libstdcxx-dev}}/usr/include/c++/{gcc_major}",
-    "-idirafter",
-    "{{libstdcxx-dev}}/usr/include/{multiarch}/c++/{gcc_major}",
-
-    # Use -idirafter for libc headers in C++ to maintain correct search order for #include_next
-    "-idirafter",
-    "{{linux-libc-dev}}/usr/include",
-    "-idirafter",
-    "{{linux-libc-dev}}/usr/include/{multiarch}",
-    "-idirafter",
-    "{{libc6-dev}}/usr/include",
-    "-idirafter",
-    "{{libc6-dev}}/usr/include/{multiarch}",
-
-    # Workaround for rules_rust cargo_build_script and rules_foreign_cc
-    "-idirafter",
-    "../../../../../../../{{libgcc-dev}}/usr/lib/gcc/{multiarch}/{gcc_major}/include",
-    "-idirafter",
-    "../../../../../../../{{libstdcxx-dev}}/usr/include/c++/{gcc_major}",
-    "-idirafter",
-    "../../../../../../../{{libstdcxx-dev}}/usr/include/{multiarch}/c++/{gcc_major}",
-    "-idirafter",
-    "../../../../../../../{{linux-libc-dev}}/usr/include",
-    "-idirafter",
-    "../../../../../../../{{linux-libc-dev}}/usr/include/{multiarch}",
-    "-idirafter",
-    "../../../../../../../{{libc6-dev}}/usr/include",
-    "-idirafter",
-    "../../../../../../../{{libc6-dev}}/usr/include/{multiarch}",
+    "{{sysroot}}/usr/lib/gcc/{multiarch}/{gcc_major}/include",
+    "-isystem",
+    "{{sysroot}}/usr/include/c++/{gcc_major}",
+    "-isystem",
+    "{{sysroot}}/usr/include/{multiarch}/c++/{gcc_major}",
+    "-isystem",
+    "{{sysroot}}/usr/include",
+    "-isystem",
+    "{{sysroot}}/usr/include/{multiarch}",
 ]
 
 _LINK_ARGS = [
-    # Debian ships libc.so/libm.so as GNU ld scripts (GROUP/AS_NEEDED) that name
-    # the real .so files by absolute host path, e.g. /lib/x86_64-linux-gnu/libc.so.6.
-    #
-    # Usually, this would be handled by `rules_distroless`.
-    #
-    # However, we don't depend on the rules_distroless-generated targets to build the sysroot,
-    # and instead we depend on `//:directory` targets.
-    # Therefore, we lose out on the automated fixes, and must add them by hand.
-    "-Wl,--remap-inputs=/lib/{multiarch}/libc.so.6={{libc6}}/usr/lib/{multiarch}/libc.so.6",
-    "-Wl,--remap-inputs=/lib/{multiarch}/libm.so.6={{libc6}}/usr/lib/{multiarch}/libm.so.6",
-    "-Wl,--remap-inputs=/lib/{multiarch}/libmvec.so.1={{libc6}}/usr/lib/{multiarch}/libmvec.so.1",
-    "-Wl,--remap-inputs=/{dynamic_linker}={{libc6}}/usr/{dynamic_linker}",
-    "-Wl,--remap-inputs=/usr/lib/{multiarch}/libc_nonshared.a={{libc6-dev}}/usr/lib/{multiarch}/libc_nonshared.a",
-    "-B",
-    "{{libc6}}/lib/{multiarch}",
-    "-Wl,-rpath-link=/lib/{multiarch}",
-    "-B",
-    "{{libc6-dev}}/usr/lib/{multiarch}",
-    "-L",
-    "{{libgcc-s1}}/lib/{multiarch}",
-    "-L",
-    "{{libstdcxx-dev}}/usr/lib/gcc/{multiarch}/{gcc_major}",
-
-    # For rules_foreign_cc and rules_rust to work after changing its workdir
-    "-B",
-    "../../../../../../../{{libc6}}/lib/{multiarch}",
-    "-B",
-    "../../../../../../../{{libc6-dev}}/usr/lib/{multiarch}",
-    "-L",
-    "../../../../../../../{{libgcc-s1}}/lib/{multiarch}",
-    "-L",
-    "../../../../../../../{{libgcc-dev}}/usr/lib/gcc/{multiarch}/{gcc_major}",
-    "-L",
-    "../../../../../../../{{libstdcxx-dev}}/usr/lib/gcc/{multiarch}/{gcc_major}",
-
-    # Link libc_nonshared.a to resolve atexit and other startup functions
-    # Use -u to pull in specific symbols without --whole-archive (which causes duplicate definition errors
-    # when multiple -B paths point to the same directory)
-    "-Wl,-u,atexit",
-    "-Wl,-u,at_quick_exit",
-    "-l:libc_nonshared.a",
+    # Select development libraries from the shared multiarch sysroot.
+    # Libtool requires the directory in the same argument as -L.
+    "-L{{sysroot}}/usr/lib/gcc/{multiarch}/{gcc_major}",
+    "-L{{sysroot}}/usr/lib/{multiarch}",
 ]
 
 PLATFORM_DEPENDENT_ARGS = [
     struct(
+        suffix = "_programs",
+        actions = [
+            "@rules_cc//cc/toolchains/actions:c_compile",
+            "@rules_cc//cc/toolchains/actions:cpp_compile_actions",
+            "@rules_cc//cc/toolchains/actions:assembly_actions",
+            "@rules_cc//cc/toolchains/actions:link_actions",
+        ],
+        # collect2 searches directories, even when the GCC driver accepts a
+        # filename prefix. Declare the distribution's unprefixed aliases and
+        # use their directory so both stages choose the downloaded programs.
+        args = [
+            # Joined arguments survive Libtool's compiler-option filtering.
+            "-B{{gcc-programs}}/{gcc}/bin/",
+            # Libtool probes startup objects through the compiler before the
+            # final link, so compile actions need this same declared search.
+            "-B{{sysroot}}/usr/lib/{multiarch}/",
+            "-B{{sysroot}}/usr/lib/gcc/{multiarch}/{gcc_major}/",
+        ],
+    ),
+    struct(
         suffix = "_c_includes",
-        actions = ["@rules_cc//cc/toolchains/actions:c_compile"],
+        # Preprocessed assembly (.S) reads the same C system headers.
+        actions = [
+            "@rules_cc//cc/toolchains/actions:c_compile",
+            "@rules_cc//cc/toolchains/actions:preprocess_assemble",
+        ],
         args = _C_INCLUDES_ARGS,
     ),
     struct(

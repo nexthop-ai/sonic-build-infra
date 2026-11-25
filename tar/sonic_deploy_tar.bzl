@@ -1,5 +1,6 @@
 """Rule to wrap tar(), which ensures binaries are stripped, and creates tars with debug symbols"""
 
+load("@bazel_lib//lib:expand_template.bzl", "expand_template")
 load("@bazel_lib//lib:utils.bzl", "propagate_common_rule_attributes")
 load("@tar.bzl//tar:tar.bzl", "tar", "tar_rule")
 load("//binary:debug_symbols.bzl", "DebugSymbolsInfo")
@@ -33,7 +34,10 @@ _runtime_tar = rule(
     },
 )
 
-def _sonic_deploy_tar_impl(name, force_debug_build, binaries = {}, srcs = [], mtree = [], **kwargs):
+def _sonic_deploy_tar_impl(name, force_debug_build, preserve_install_rpath, compress_debug_sections, install_rpath, binaries = {}, srcs = [], mtree = [], debug_symlinks = {}, mtree_substitutions = {}, **kwargs):
+    # Symbolic macros supply None for omitted common attributes.
+    # Legacy tar/expand_template macros require a concrete tags sequence.
+    kwargs["tags"] = kwargs.get("tags") or []
     # We strip each binary and generate its mtree line pointing at the stripped ELF
     stripped_targets = []
     debug_targets = []
@@ -45,6 +49,9 @@ def _sonic_deploy_tar_impl(name, force_debug_build, binaries = {}, srcs = [], mt
             name = stripped_name,
             src = binary,
             force_debug_build = force_debug_build,
+            install_rpath = install_rpath,
+            compress_debug_sections = compress_debug_sections,
+            preserve_install_rpath = preserve_install_rpath,
             **propagate_common_rule_attributes(kwargs)
         )
         debug_symbol_targets.append(":" + stripped_name)
@@ -73,10 +80,33 @@ def _sonic_deploy_tar_impl(name, force_debug_build, binaries = {}, srcs = [], mt
     # and attaches DebugSymbolsInfo.
     rttar_kwargs = dict(kwargs)
     rttar_kwargs.pop("visibility", None)
+    # Resolve declared file locations before configurable installation paths.
+    # Both expansions operate on the manifest; payloads are archived only once.
+    source_mtree = name + "_rttar_mtree"
+    expand_template(
+        name = source_mtree,
+        out = source_mtree + ".txt",
+        data = srcs + stripped_targets,
+        template = ["#mtree", "{content}", ""],
+        substitutions = {"{content}": "\n".join(mtree + binary_mtree)},
+        stamp = rttar_kwargs.get("stamp", 0),
+        visibility = ["//visibility:private"],
+        **propagate_common_rule_attributes(rttar_kwargs)
+    )
+    install_mtree = name + "_install_mtree"
+    expand_template(
+        name = install_mtree,
+        out = install_mtree + ".txt",
+        template = ":" + source_mtree,
+        substitutions = mtree_substitutions,
+        stamp = rttar_kwargs.get("stamp", 0),
+        visibility = ["//visibility:private"],
+        **propagate_common_rule_attributes(rttar_kwargs)
+    )
     tar(
         name = name + "_rttar",
         srcs = srcs + stripped_targets,
-        mtree = mtree + binary_mtree,
+        mtree = ":" + install_mtree,
         visibility = ["//visibility:private"],
         **rttar_kwargs
     )
@@ -94,6 +124,7 @@ def _sonic_deploy_tar_impl(name, force_debug_build, binaries = {}, srcs = [], mt
     debug_symbols_tar(
         name = name + ".debug_symbols",
         srcs = debug_targets,
+        symlinks = debug_symlinks,
         visibility = kwargs["visibility"],
     )
 
@@ -101,12 +132,14 @@ sonic_deploy_tar = macro(
     doc = """Wrapper around tar(), which ensures binaries are stripped, and creates tars with debug symbols.
 
 It produces two targets:
-- `:<name>`: A tar containing stripped binaries. It behaves exactly as a `tar()`, except this target is augmented to return a `DebugSymbolsInfo` provider, containing the debug symbols of all its binaries.
+- `:<name>`: A tar containing stripped binaries, with fixed default timestamps for explicit entries and a `DebugSymbolsInfo` provider containing its binaries' debug symbols.
 - `:<name>.debug_symbols`: A standalone tar containing the debug symbols from the binaries on this tar.
 """,
     implementation = _sonic_deploy_tar_impl,
     inherit_attrs = tar_rule,
     attrs = {
+        "preserve_install_rpath": attr.bool(default = False, configurable = False, doc = "Retain installation RPATH/RUNPATH entries and remove Bazel build paths during ELF splitting."),
+        "debug_symlinks": attr.string_dict(configurable = False, doc = "Installation symlinks added only to the debug-symbol tar."),
         "srcs": attr.label_list(
             default = [],
             allow_files = True,
@@ -117,15 +150,34 @@ It produces two targets:
         "mtree": attr.string_list(
             default = [],
             configurable = False,
+            doc = "Mtree entries; tar.bzl supplies default_mtime where neither the entry nor an inherited /set value supplies a timestamp.",
+        ),
+        "mtree_substitutions": attr.string_dict(
+            default = {},
+            doc = "Configured text substitutions for installation paths and symlink destinations in the manifest. File locations are expanded first; binary inputs and the archive are not rewritten.",
+        ),
+        "default_mtime": attr.string(
+            default = "1672560000",
+            doc = "Fallback archive timestamp, passed to tar.bzl. Explicit and inherited times are preserved; an empty string retains tar.bzl's original behavior.",
         ),
         "binaries": attr.string_keyed_label_dict(
             doc = """Maps an mtree prefix (e.g. \"./usr/bin/foo uid=0 gid=0 mode=0755 type=file\") to a binary target.
-The binary will then be replaced with its stripped version behind the scenes.
+The binary will then be replaced with its stripped version behind the scenes. Missing time uses default_mtime; explicit time values are preserved.
 """,
             default = {},
             configurable = False,
         ),
+        "compress_debug_sections": attr.bool(
+            default = True,
+            doc = "Compress extracted DWARF before pairing runtime ELF and symbols, as Debhelper does for dbgsym packages. Set False when the original installation ships uncompressed debug sections.",
+        ),
+        "install_rpath": attr.string(
+            default = "",
+            doc = "Set this exact installation search path before debug splitting while retaining the original RPATH/RUNPATH tag. Empty preserves the existing policy.",
+        ),
         "force_debug_build": attr.bool(
+            # This controls which targets the macro creates, before configuration.
+            configurable = False,
             doc = "Whether the binaries should be rebuilt with debug information before stripping. This will override Bazel's regular CLI compilation instructions, like `--strip=never`",
             default = False,
         ),

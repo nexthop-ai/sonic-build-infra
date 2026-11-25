@@ -1,0 +1,373 @@
+load("@tar.bzl//tar:tar.bzl", "tar")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_import")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("//oci:accounts.bzl", "account_layer")
+load("//oci:installed_packages.bzl", "installed_packages")
+load("//oci:runtime_packages.bzl", "runtime_packages", "runtime_packages_group")
+load("//tar:sonic_deploy_tar.bzl", "sonic_deploy_tar")
+load(":base.bzl", "fixture_base")
+load(":metadata_fixture.bzl", "metadata_fixture")
+
+config_setting(
+    name = "arm64",
+    constraint_values = ["@platforms//cpu:arm64"],
+)
+
+_ARCH = select({
+    ":arm64": "arm64",
+    "//conditions:default": "amd64",
+})
+
+exports_files(["fixture.py"])
+
+py_test(
+    name = "installed_packages_test",
+    srcs = ["installed_packages_test.py"],
+    deps = ["//oci:installed_packages_lib"],
+)
+
+py_test(
+    name = "owner_metadata_test",
+    srcs = ["owner_metadata_test.py"],
+    deps = ["//oci:package_metadata"],
+)
+
+py_test(
+    name = "installed_packages_alias_test",
+    srcs = ["installed_packages_alias_test.py"],
+    data = ["//oci:installed_packages.bzl"],
+    deps = ["//oci:package_metadata"],
+)
+
+py_binary(
+    name = "fixture",
+    srcs = ["fixture.py"],
+)
+
+fixture_base(
+    name = "base",
+    architecture = _ARCH,
+)
+
+account_layer(
+    name = "accounts",
+    testonly = True,
+    architecture = _ARCH,
+    base = ":base",
+    groups = [
+        {
+            "name": "redis",
+            "password": "x",
+            "gid": 101,
+        },
+        {
+            "name": "_ssh",
+            "password": "x",
+            "gid": 104,
+        },
+    ],
+    users = [{
+        "username": "redis",
+        "password": "x",
+        "uid": 100,
+        "gid": 101,
+        "home": "/var/lib/redis",
+        "shell": "/usr/sbin/nologin",
+    }],
+)
+
+py_test(
+    name = "account_layer_test",
+    srcs = ["account_layer_test.py"],
+    args = [
+        "$(location :accounts)",
+        "$(location :accounts.receipt)",
+    ] + select({
+        ":arm64": ["arm64"],
+        "//conditions:default": ["amd64"],
+    }),
+    data = [
+        ":accounts",
+        ":accounts.receipt",
+    ],
+)
+
+py_binary(
+    name = "metadata_fixture_tool",
+    srcs = [
+        "fixture.py",
+        "metadata_fixture.py",
+    ],
+    imports = ["."],
+    main = "metadata_fixture.py",
+    deps = ["//oci:installed_packages_lib"],
+)
+
+metadata_fixture(
+    name = "metadata_inputs",
+    apt = "metadata_apt.json",
+    architecture = _ARCH,
+    changelog = "metadata_changelog",
+    control = "metadata_control",
+    module = "metadata_owner.MODULE.bazel",
+    policy = "metadata_policy.json",
+    source = "metadata_source_payload.tar",
+)
+
+# Source owners can publish an alias while the actual TAR lives in a helper
+# repository or target. The receipt must keep this requested public identity.
+alias(
+    name = "metadata_source.tar",
+    actual = ":metadata_source_payload.tar",
+)
+
+runtime_packages(
+    name = "metadata_owner.json",
+    testonly = True,
+    changelog = ":metadata_changelog",
+    control = ":metadata_control",
+    module_name = "example",
+    packages = {"example": ":metadata_source.tar"},
+    required_paths = {"example": ["usr/share/example/data"]},
+)
+
+installed_packages(
+    name = "installed_metadata",
+    testonly = True,
+    apt_receipt = ":metadata_apt.json",
+    architecture = _ARCH,
+    base = ":metadata_inputs",
+    owner_metadata = [":metadata_owner.json"],
+    source_modules = {"example": ":metadata_owner.MODULE.bazel"},
+    source_spec = ":metadata_policy.json",
+    sources = {"example": ":metadata_source.tar"},
+)
+
+filegroup(
+    name = "installed_metadata_receipt",
+    testonly = True,
+    srcs = [":installed_metadata"],
+    output_group = "metadata",
+)
+
+py_test(
+    name = "installed_packages_rule_test",
+    srcs = ["installed_packages_rule_test.py"],
+    args = [
+        "$(location :installed_metadata)",
+        "$(location :installed_metadata_receipt)",
+        "$(location :metadata_source.tar)",
+    ],
+    data = [
+        ":installed_metadata",
+        ":installed_metadata_receipt",
+        ":metadata_source.tar",
+    ],
+)
+
+py_test(
+    name = "runtime_packages_test",
+    srcs = ["runtime_packages_test.py"],
+    deps = ["//oci:runtime_packages_lib"],
+)
+
+# Real target ELFs exercise shared-library dependency generation. The metadata
+# action executes Debian tools for the build host and only inspects target code.
+cc_binary(
+    name = "libmetadata-fixture.so.1",
+    srcs = ["metadata/library.c"],
+    linkopts = ["-Wl,-soname,libmetadata-fixture.so.1"],
+    linkshared = True,
+)
+
+cc_import(
+    name = "metadata_library",
+    shared_library = ":libmetadata-fixture.so.1",
+)
+
+cc_binary(
+    name = "metadata_cli",
+    srcs = ["metadata/cli.c"],
+    deps = [":metadata_library"],
+)
+
+sonic_deploy_tar(
+    name = "metadata_library_tar",
+    binaries = {"usr/lib/libmetadata-fixture.so.1 type=file mode=0555": ":libmetadata-fixture.so.1"},
+)
+
+sonic_deploy_tar(
+    name = "metadata_cli_tar",
+    binaries = {"usr/bin/metadata-cli type=file mode=0555": ":metadata_cli"},
+)
+
+runtime_packages(
+    name = "metadata_library.json",
+    testonly = True,
+    apt_packages = {"@sysroot//libc6:data": "@sysroot//libc6:control"},
+    changelog = "metadata/debian/changelog",
+    control = "metadata/debian/control",
+    packages = {"metadata-library": ":metadata_library_tar"},
+    required_paths = {"metadata-library": ["usr/lib/libmetadata-fixture.so.1"]},
+)
+
+runtime_packages(
+    name = "metadata_cli.json",
+    testonly = True,
+    changelog = "metadata/debian/changelog",
+    control = "metadata/debian/control",
+    dependencies = [":metadata_library.json"],
+    packages = {"metadata-cli": ":metadata_cli_tar"},
+    required_paths = {"metadata-cli": ["usr/bin/metadata-cli"]},
+)
+
+runtime_packages_group(
+    name = "metadata_combined.json",
+    testonly = True,
+    packages = [
+        ":metadata_cli.json",
+        ":metadata_library.json",
+    ],
+)
+
+py_test(
+    name = "runtime_packages_rule_test",
+    srcs = ["runtime_packages_rule_test.py"],
+    args = [
+        "$(location :metadata_combined.json)",
+        "$(location :metadata_library_tar)",
+        "$(location :metadata_cli_tar)",
+        "$(location //oci:runtime_packages)",
+        "$(location //tools/build_tools:kernel_runtime)",
+    ] + select({
+        ":arm64": ["$(location @bsd_tar_toolchains_linux_arm64//:tar)"],
+        "//conditions:default": ["$(location @bsd_tar_toolchains_linux_amd64//:tar)"],
+    }) + [
+        "$(location metadata/debian/control)",
+        "$(location metadata/debian/changelog)",
+    ] + select({
+        ":arm64": ["arm64"],
+        "//conditions:default": ["amd64"],
+    }) + [
+        "$(location //tools/build_tools:patchelf)",
+        "$(location @sysroot//libc6:data)",
+        "$(location @sysroot//libc6:control)",
+        "$(location metadata/otelcol-contrib/control)",
+        "$(location metadata/otelcol-contrib/otelcol-contrib.service)",
+    ],
+    data = [
+        "metadata/debian/changelog",
+        "metadata/debian/control",
+        "metadata/otelcol-contrib/control",
+        "metadata/otelcol-contrib/otelcol-contrib.service",
+        ":metadata_cli_tar",
+        ":metadata_combined.json",
+        ":metadata_library_tar",
+        "//oci:runtime_packages",
+        "//tools/build_tools:kernel_runtime",
+        "//tools/build_tools:patchelf",
+        "@sysroot//libc6:control",
+        "@sysroot//libc6:data",
+    ] + select({
+        ":arm64": ["@bsd_tar_toolchains_linux_arm64//:tar"],
+        "//conditions:default": ["@bsd_tar_toolchains_linux_amd64//:tar"],
+    }),
+)
+
+# A small owner-authored service package exercises the public control-file API.
+tar(
+    name = "control_files_payload",
+    testonly = True,
+    srcs = ["control_files/service-fixture.init", "control_files/service-fixture.service", "control_files/settings.conf"],
+    mtree = [
+        "./etc type=dir mode=0755 uid=0 gid=0 time=0",
+        "./etc/init.d type=dir mode=0755 uid=0 gid=0 time=0",
+        "./etc/init.d/service-fixture type=file mode=0755 uid=0 gid=0 time=0 content=$(location control_files/service-fixture.init)",
+        "./etc/service-fixture type=dir mode=0755 uid=0 gid=0 time=0",
+        "./etc/service-fixture/settings.conf type=file mode=0644 uid=0 gid=0 time=0 content=$(location control_files/settings.conf)",
+        "./usr/lib/systemd/system/service-fixture.service type=file mode=0644 uid=0 gid=0 time=0 content=$(location control_files/service-fixture.service)",
+    ],
+)
+[
+    runtime_packages(
+        name = "control_files_" + variant,
+        testonly = True,
+        control = "control_files/control",
+        changelog = "control_files/changelog",
+        packages = {"service-fixture": ":control_files_payload"},
+        debian_files = {name: "control_files/" + name for name in [
+            "compat", "service-fixture.preinst", "service-fixture.postinst", "service-fixture.postrm",
+            "service-fixture.init", "service-fixture.service",
+        ]},
+        control_file_helpers = helpers,
+    )
+    for variant, helpers in [
+        ("preserved", [["dh_systemd_enable"], ["dh_installinit", "-r"], ["dh_systemd_start"], ["dh_installdeb"]]),
+        ("restart", [["dh_systemd_enable"], ["dh_installinit"], ["dh_systemd_start"], ["dh_installdeb"]]),
+        ("default", []),
+    ]
+]
+[
+    filegroup(
+        name = "control_files_" + variant + "_tree",
+        testonly = True,
+        srcs = [":control_files_" + variant],
+        output_group = "debian",
+    )
+    for variant in ["preserved", "restart", "default"]
+]
+py_test(
+    name = "runtime_control_files_rule_test",
+    srcs = ["runtime_control_files_rule_test.py"],
+    args = [
+        "$(location :control_files_preserved)", "$(location :control_files_preserved_tree)",
+        "$(location :control_files_restart)", "$(location :control_files_restart_tree)",
+        "$(location :control_files_default)", "$(location :control_files_default_tree)",
+        "$(location :control_files_payload)",
+        "$(location control_files/service-fixture.preinst)",
+        "$(location control_files/service-fixture.postinst)",
+        "$(location control_files/service-fixture.postrm)",
+    ],
+    data = [
+        ":control_files_preserved", ":control_files_preserved_tree",
+        ":control_files_restart", ":control_files_restart_tree",
+        ":control_files_default", ":control_files_default_tree", ":control_files_payload",
+        "control_files/service-fixture.preinst", "control_files/service-fixture.postinst", "control_files/service-fixture.postrm",
+    ],
+)
+
+[
+    tar(
+        name = "control_payload_" + name,
+        testonly = True,
+        srcs = ["control_files/service-fixture.init"],
+        mtree = ["etc/init.d/" + name + " type=file uid=0 gid=0 mode=0755 time=0 content=$(location control_files/service-fixture.init)"],
+    )
+    for name in ["fancontrol", "lm-sensors"]
+]
+runtime_packages(
+    name = "per_package_control_files",
+    testonly = True,
+    control = "control_files/per-package-control",
+    changelog = "control_files/changelog",
+    packages = {"fancontrol": ":control_payload_fancontrol", "lm-sensors": ":control_payload_lm-sensors", "metadata-library": ":metadata_library_tar"},
+    apt_packages = {"@sysroot//libc6:data": "@sysroot//libc6:control"},
+    debian_files = {name + ".init": "control_files/service-fixture.init" for name in ["fancontrol", "lm-sensors"]},
+    control_file_helpers = [["dh_installdeb"]],
+    control_file_helpers_by_package = {
+        "fancontrol": [["dh_installinit", "--restart-after-upgrade"], ["dh_installdeb"]],
+        "lm-sensors": [["dh_installinit", "--no-start"], ["dh_installdeb"]],
+        "metadata-library": [["dh_makeshlibs"], ["dh_installdeb"]],
+    },
+)
+filegroup(name = "per_package_control_tree", testonly = True, srcs = [":per_package_control_files"], output_group = "debian")
+py_test(
+    name = "runtime_per_package_control_test",
+    srcs = ["runtime_per_package_control_test.py"],
+    args = ["$(location :per_package_control_files)", "$(location :per_package_control_tree)"],
+    data = [":per_package_control_files", ":per_package_control_tree"],
+)
+
+# PAM RADIUS deliberately overrides dh_shlibdeps with an empty recipe.
+runtime_packages(name="metadata_library_no_shlibdeps.json",testonly=True,control="metadata/debian/control",changelog="metadata/debian/changelog",packages={"metadata-library":":metadata_library_tar"},shlibdeps=False)
+py_test(name="runtime_empty_shlibdeps_test",srcs=["runtime_empty_shlibdeps_test.py"],args=["$(rootpath :metadata_library_no_shlibdeps.json)","$(rootpath :metadata_library.json)","$(rootpath :metadata_library_tar)","$(rootpath //tools/build_tools:kernel_runtime)","$(rootpath metadata/debian/control)","$(rootpath metadata/debian/changelog)"]+select({":arm64":["arm64"],"//conditions:default":["amd64"]}),data=[":metadata_library_no_shlibdeps.json",":metadata_library.json",":metadata_library_tar","//tools/build_tools:kernel_runtime","metadata/debian/control","metadata/debian/changelog"],deps=["//oci:runtime_packages_lib"])

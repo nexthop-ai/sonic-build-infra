@@ -1,0 +1,11 @@
+changelog-fixture (1.8-1) unstable; urgency=medium
+
+  CURRENT_NEWS
+
+ -- Fixture Maintainer <fixture@example.invalid>  Wed, 01 Jan 2025 00:00:00 +0000
+
+changelog-fixture (1.1-1) unstable; urgency=medium
+
+  OLD_NEWS
+
+ -- Fixture Maintainer <fixture@example.invalid>  Sun, 01 Jan 2017 00:00:00 +0000

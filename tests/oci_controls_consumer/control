@@ -1,0 +1,9 @@
+Source: control-consumer
+Build-Depends: debhelper-compat (= 13)
+Section: admin
+Priority: optional
+Maintainer: Consumer <consumer@example.invalid>
+
+Package: control-consumer
+Architecture: all
+Description: Declared source-control projection consumer

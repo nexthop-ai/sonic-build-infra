@@ -1,0 +1,151 @@
+name: Shared Rust dependencies
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Only automatic runs for the same pull request supersede each other.
+  group: shared-rust-deps-${{ github.run_attempt == '1' && github.event.pull_request.number || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Shared Rust (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: AMD64
+            runner: ubuntu-24.04
+            machine: x86_64
+            debian_arch: amd64
+            bazel_arch: x86_64
+            bazel_sha: 61d89402f0368e64b6c827be5de79d8e65382e8124c3cbb97325611a1851392e
+          - arch: ARM64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+            debian_arch: arm64
+            bazel_arch: arm64
+            bazel_sha: b7f2a85595e8a87d54843bc656c1e379fd9b8c1b5f783dc41717c1d7eb7cc49f
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    container:
+      image: debian:trixie-20260918@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      EXPECTED_MACHINE: ${{ matrix.machine }}
+      EXPECTED_DEBIAN_ARCH: ${{ matrix.debian_arch }}
+      CI_IMAGE: debian:trixie-20260918@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+    steps:
+      - name: Install native build tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends binutils build-essential ca-certificates curl gdb git python3 tar xz-utils
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check public evidence boundaries
+        run: python3 -B ci/tests/evidence_test.py
+      - name: Verify native execution and install Bazel 8.5.1
+        env:
+          BAZEL_ARCH: ${{ matrix.bazel_arch }}
+          BAZEL_SHA: ${{ matrix.bazel_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == "$EXPECTED_MACHINE" ]]
+          [[ "$(dpkg --print-architecture)" == "$EXPECTED_DEBIAN_ARCH" ]]
+          . /etc/os-release
+          [[ "$ID" == debian && "$VERSION_CODENAME" == trixie ]]
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          curl --fail --location --retry 3 --output /tmp/bazel "https://releases.bazel.build/8.5.1/release/bazel-8.5.1-linux-${BAZEL_ARCH}"
+          printf '%s  %s\n' "$BAZEL_SHA" /tmp/bazel | sha256sum --check --strict
+          install -m 0755 /tmp/bazel /usr/local/bin/bazel
+      - name: Build shared Rust tests from tracked Cargo inputs
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tools/rust -p '*_test.py'
+          mkdir -p rust/deps/ci-artifacts
+          install -d -m 0700 "$RUNNER_TEMP/sonic-infra-rust"
+          raw="$RUNNER_TEMP/sonic-infra-rust"
+          cd rust/deps
+          bazel test --jobs=2 --lockfile_mode=update --test_output=errors --build_event_json_file="$raw/test-events.json" //tests:serde_roundtrip_test //tests:tracing_test //tests:supervisor_io_test //tests:panic_runtime_test //tests:dash_ha_contract_test 2>&1 | tee ci-artifacts/tests.log
+          bazel build --jobs=2 --build_event_json_file="$raw/ha-dependency-events.json" \
+            //:anyhow //:atomic_enum //:better-panic //:bollard //:contracts \
+            //:dashmap //:derivative //:enumset //:file-rotate //:futures-core \
+            //:futures-util //:hex //:human-panic //:hyper-util //:pretty_assertions \
+            //:proc-macro2 //:prost-build //:quote //:serde_serializer_quick_unsupported \
+            //:serde_with //:signal-hook //:strum //:strum_macros //:syn //:tabled \
+            //:tokio-util //:tonic-build //:tower //:tracing-error //:uuid \
+            2>&1 | tee ci-artifacts/ha-dependencies.log
+          bazel cquery --noimplicit_deps 'kind("rust_library rule", deps(//:serde))' > ci-artifacts/serde-dependencies.txt
+          cp bazel-testlogs/tests/serde_roundtrip_test/test.xml ci-artifacts/serde-test.xml
+          cp bazel-testlogs/tests/tracing_test/test.xml ci-artifacts/tracing-test.xml
+          cp bazel-testlogs/tests/supervisor_io_test/test.xml ci-artifacts/supervisor-io-test.xml
+          cp bazel-testlogs/tests/panic_runtime_test/test.xml ci-artifacts/panic-runtime-test.xml
+          cp bazel-testlogs/tests/dash_ha_contract_test/test.xml ci-artifacts/dash-ha-contract-test.xml
+          bazel test --jobs=2 -c opt --@rules_rust//rust/settings:lto=fat --@rules_rust//rust/settings:codegen_units=1 --test_output=errors --build_event_json_file="$raw/release-events.json" //tests:panic_runtime_test 2>&1 | tee ci-artifacts/release-tests.log
+          cp bazel-testlogs/tests/panic_runtime_test/test.xml ci-artifacts/panic-release-test.xml
+          test ! -e Cargo.Bazel.lock
+          git diff --exit-code -- Cargo.lock
+      - name: Verify Cargo release consumers and matching symbols
+        run: |
+          set -euo pipefail
+          root="$PWD"
+          artifacts="$root/rust/deps/ci-artifacts"
+          raw="$RUNNER_TEMP/sonic-infra-rust"
+          cd rust/tests/release_consumer
+          overrides=(--override_module=sonic-build-infra="$root" --override_module=sonic-rust-deps="$root/rust/deps")
+          platform=()
+          if [[ "$EXPECTED_DEBIAN_ARCH" == arm64 ]]; then platform=(--config=aarch64); fi
+          bazel run "${overrides[@]}" "${platform[@]}" @sonic_build_infra//rust:cargo -- metadata --locked --format-version=1 --manifest-path "$root/rust/deps/Cargo.toml" > "$artifacts/cargo-release-metadata.json"
+          bazel build "${overrides[@]}" "${platform[@]}" --jobs=2 //:new_crate_exports
+          bazel test "${overrides[@]}" "${platform[@]}" --jobs=2 --test_output=errors //:runtime_debug_test 2>&1 | tee "$artifacts/cargo-release-tests.log"
+          bazel aquery "${overrides[@]}" "${platform[@]}" -c fastbuild --@rules_rust//rust/settings:lto=fat --@rules_rust//rust/settings:codegen_units=1 --output=jsonproto 'deps(set(//:probe.release //:probe.unprofiled))' > "$raw/cargo-release-actions.json"
+          python3 profile_contract.py "$raw/cargo-release-actions.json" > "$artifacts/cargo-release-profile.json"
+      - name: Collect shared dependency evidence
+        if: always()
+        run: |
+          mkdir -p rust/deps/ci-artifacts
+          for file in Cargo.toml Cargo.lock MODULE.bazel MODULE.bazel.lock; do
+            if [[ -f rust/deps/$file ]]; then cp rust/deps/$file rust/deps/ci-artifacts/; fi
+          done
+          git rev-parse HEAD > rust/deps/ci-artifacts/source-commit.txt
+          uname -m > rust/deps/ci-artifacts/machine.txt
+      - name: Retain shared Rust dependency evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonic-rust-deps-${{ matrix.arch }}-${{ github.sha }}
+          # Raw BEPs, action graphs and spawn logs are private job diagnostics.
+          path: |
+            rust/deps/ci-artifacts/Cargo.toml
+            rust/deps/ci-artifacts/Cargo.lock
+            rust/deps/ci-artifacts/MODULE.bazel
+            rust/deps/ci-artifacts/MODULE.bazel.lock
+            rust/deps/ci-artifacts/source-commit.txt
+            rust/deps/ci-artifacts/machine.txt
+            rust/deps/ci-artifacts/tests.log
+            rust/deps/ci-artifacts/ha-dependencies.log
+            rust/deps/ci-artifacts/release-tests.log
+            rust/deps/ci-artifacts/cargo-release-tests.log
+            rust/deps/ci-artifacts/serde-dependencies.txt
+            rust/deps/ci-artifacts/serde-test.xml
+            rust/deps/ci-artifacts/tracing-test.xml
+            rust/deps/ci-artifacts/supervisor-io-test.xml
+            rust/deps/ci-artifacts/panic-runtime-test.xml
+            rust/deps/ci-artifacts/dash-ha-contract-test.xml
+            rust/deps/ci-artifacts/panic-release-test.xml
+            rust/deps/ci-artifacts/cargo-release-metadata.json
+            rust/deps/ci-artifacts/cargo-release-profile.json
+          if-no-files-found: error
+          retention-days: 14

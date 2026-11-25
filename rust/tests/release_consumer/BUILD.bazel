@@ -1,0 +1,78 @@
+load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@sonic_build_infra//rust:release.bzl", "cargo_release_binary")
+load("@sonic_build_infra//tar:sonic_deploy_tar.bzl", "sonic_deploy_tar")
+
+rust_library(
+    name = "probe_dependency",
+    srcs = ["dependency.rs"],
+    crate_root = "dependency.rs",
+    edition = "2021",
+    deps = ["@sonic_rust_deps//:regex"],
+)
+
+rust_binary(
+    name = "probe.unprofiled",
+    crate_name = "release_probe",
+    srcs = ["main.rs"],
+    crate_root = "main.rs",
+    edition = "2021",
+    experimental_use_cc_common_link = 0,
+    # Explicit debug information exercises installation's matching-symbol contract.
+    rustc_flags = ["-Cdebuginfo=2", "-Cstrip=none"],
+    deps = [":probe_dependency"],
+)
+
+cargo_release_binary(name = "probe.release", src = ":probe.unprofiled")
+
+rust_binary(
+    name = "watchdog.unprofiled",
+    crate_name = "gnmi_watchdog",
+    srcs = ["@gnmi_watchdog_source//file"],
+    crate_root = "@gnmi_watchdog_source//file",
+    edition = "2021",
+    experimental_use_cc_common_link = 0,
+    # The original watchdog builds without release DWARF.
+    rustc_flags = ["-Cdebuginfo=0"],
+    deps = ["@sonic_rust_deps//:chrono"],
+)
+
+cargo_release_binary(name = "watchdog.release", src = ":watchdog.unprofiled")
+
+sonic_deploy_tar(
+    name = "release-probe.runtime",
+    binaries = {"usr/bin/release-probe type=file uid=0 gid=0 mode=0755": ":probe.release"},
+    tags = [],
+    visibility = ["//visibility:public"],
+)
+
+sonic_deploy_tar(
+    name = "gnmi-watchdog.runtime",
+    binaries = {"usr/bin/gnmi_watchdog type=file uid=0 gid=0 mode=0755": ":watchdog.release"},
+    tags = [],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "runtime_debug_test",
+    srcs = ["runtime_contract_test.py"],
+    main = "runtime_contract_test.py",
+    args = [
+        "$(rootpath :release-probe.runtime)",
+        "$(rootpath :release-probe.runtime.debug_symbols)",
+        "$(rootpath :gnmi-watchdog.runtime)",
+        "$(rootpath @sonic_build_infra//toolchains/binutils:readelf)",
+    ],
+    data = [
+        ":release-probe.runtime",
+        ":release-probe.runtime.debug_symbols",
+        ":gnmi-watchdog.runtime",
+        "@sonic_build_infra//toolchains/binutils:readelf",
+    ],
+)
+
+filegroup(
+    name = "new_crate_exports",
+    srcs = ["@sonic_rust_deps//:" + name for name in ["daemonize", "pnet", "procfs", "psutil", "regex", "sysinfo", "syslog"]],
+)

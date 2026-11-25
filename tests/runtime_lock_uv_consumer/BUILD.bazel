@@ -1,0 +1,5 @@
+# The toolchain implementation is experimental and pinned with rules_python.
+load("@rules_python//python/uv/private:current_toolchain.bzl", "current_toolchain")
+load("@sonic_build_infra//python/tests:runtime_lock_tests.bzl", "runtime_lock_update_test")
+current_toolchain(name = "managed_uv")
+runtime_lock_update_test(name = "real_resolver_test", uv = ":managed_uv", uv_version = "0.12.18")
