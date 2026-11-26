@@ -53,7 +53,7 @@ jobs:
       EXPECTED_MACHINE: ${{ matrix.machine }}
       EXPECTED_DEBIAN_ARCH: ${{ matrix.debian_arch }}
       CI_IMAGE: debian:trixie-20260918@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
-      SONIC_BAZEL_REGISTRY: https://raw.githubusercontent.com/securely1g/sonic-bazel-registry/main
+      SONIC_BAZEL_REGISTRY: https://raw.githubusercontent.com/sonic-net/sonic-bazel-registry/main
     steps:
       - name: Install native build tools
         run: |
@@ -79,11 +79,19 @@ jobs:
           curl --fail --location --retry 3 --output /tmp/bazel "https://releases.bazel.build/8.5.1/release/bazel-8.5.1-linux-${BAZEL_ARCH}"
           printf '%s  %s\n' "$BAZEL_SHA" /tmp/bazel | sha256sum --check --strict
           install -m 0755 /tmp/bazel /usr/local/bin/bazel
+      - name: Exercise the default APT lock updater
+        if: matrix.arch == 'AMD64'
+        run: |
+          fixture=apt/tests/testdata/refresh
+          inputs=(--sources "$fixture/sources.json" --requests "$fixture/requests.json"
+                  --lock "$RUNNER_TEMP/apt-refresh.lock.json")
+          python3 apt/lock.py update "${inputs[@]}"
+          python3 apt/lock.py check "${inputs[@]}"
       - name: Check downloader configuration
         run: python3 -B ci/tests/debian_transport_test.py
       - name: Fetch the verified shared downloader configuration
         env:
-          SOURCE_MIRRORS_URL: https://raw.githubusercontent.com/securely1g/sonic-bazel-registry/e7ee462aaa8fbd137ea2187f175506e308d81dcb/ci/source_mirrors.cfg
+          SOURCE_MIRRORS_URL: https://raw.githubusercontent.com/sonic-net/sonic-bazel-registry/55c38af2284155eee8c7bf2481e719ec23fa2695/ci/source_mirrors.cfg
           SOURCE_MIRRORS_SHA256: c28e6882aa9ebed84fd32586112e5fbfe9684af4e4aaa9942170919a3cbd308e
         run: |
           set -euo pipefail
